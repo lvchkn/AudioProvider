@@ -32,13 +32,14 @@ public static class AudioService
             }
         });
 
-        string stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-        string stderr = await process.StandardError.ReadToEndAsync(cancellationToken);
+        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
 
-        await process.WaitForExitAsync(cancellationToken);
+        await Task.WhenAll(process.WaitForExitAsync(cancellationToken), stdoutTask, stderrTask);
 
         if (process.ExitCode != 0)
         {
+            string stderr = await stderrTask;
             throw new Exception(stderr);
         }
 
