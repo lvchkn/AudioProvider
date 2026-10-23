@@ -41,14 +41,13 @@ public class TelegramBotService
             return;
         }
 
-        bool isYTLink = message.Text?.StartsWith("https://www.youtube.com/watch?") ?? false;
-
-        if (isYTLink)
+        if (ValidationUtils.IsYTLink(message.Text))
         {
+            (string url, string filename) = ValidationUtils.GetRequestInfo(message.Text);
             long chatId = message.Chat.Id;
             Message downloadMessage = await _bot.SendMessage(chatId, "Queued...");
 
-            var request = new DownloadRequest(chatId, downloadMessage.Id, message.Text!);
+            var request = new DownloadRequest(chatId, downloadMessage.Id, message.Text!, url, filename, message.Id);
             bool result = _channel.Writer.TryWrite(request);
 
             if (!result)
@@ -111,25 +110,44 @@ public class TelegramBotService
 
         try
         {
-            await _bot.EditMessageText(request.ChatId, request.MessageId, "Downloading...", cancellationToken: _telegramCancellationToken);
             Directory.CreateDirectory(outputDir);
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(workerCancellationToken);
             timeoutCts.CancelAfter(TimeSpan.FromMinutes(5));
 
-            string audio = await AudioService.GetYTAudioFilePath(request.MessageText, outputDir, timeoutCts.Token);
+            await _bot.EditMessageText(request.ChatId, request.MessageId, "Validating...", cancellationToken: _telegramCancellationToken);
+            DownloadMetadata? metadata = await AudioService.GetMetadata(request.DownloadUrl, timeoutCts.Token);
+            if (!ValidationUtils.IsRequestValid(metadata))
+            {
+                throw new ArgumentException("Wrong arguments passed in", metadata?.ToString());
+            }
+
+            await _bot.EditMessageText(request.ChatId, request.MessageId, "Downloading...", cancellationToken: _telegramCancellationToken);
+            string audio = await AudioService.GetYTAudioFilePath(request.DownloadUrl, outputDir, timeoutCts.Token);
 
             await using FileStream fs = File.OpenRead(audio);
-            await _bot.SendAudio(request.ChatId, fs, cancellationToken: _telegramCancellationToken);
+
+            string filename = request.FileName == string.Empty
+                ? Path.GetFileNameWithoutExtension(audio)
+                : request.FileName;
+
+            Console.WriteLine($"""File "{filename}" downloaded. Metadata: {metadata}""");
+
+            var inputFile = InputFile.FromStream(fs, filename);
+            await _bot.SendAudio(request.ChatId, inputFile, replyParameters: new() { MessageId = request.TopicStarterMessageId }, cancellationToken: _telegramCancellationToken);
             await _bot.DeleteMessage(request.ChatId, request.MessageId, cancellationToken: _telegramCancellationToken);
         }
         catch (Exception ex)
         {
             ConsoleUtils.PrintException(ex);
 
+            string errorMessage = ex is ArgumentException
+                ? "Wrong arguments. Likely reasons: duration is too long or file size is too big"
+                : "Download failed!";
+
             try
             {
-                await _bot.EditMessageText(request.ChatId, request.MessageId, "Download failed!", cancellationToken: _telegramCancellationToken);
+                await _bot.EditMessageText(request.ChatId, request.MessageId, errorMessage, cancellationToken: _telegramCancellationToken);
             }
             catch (Exception telegramException)
             {
