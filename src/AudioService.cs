@@ -1,9 +1,51 @@
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace AudioProvider;
 
 public static class AudioService
 {
+    public static async Task<DownloadMetadata?> GetMetadata(string downloadUrl, CancellationToken cancellationToken)
+    {
+        var processStartInfo = new ProcessStartInfo()
+        {
+            FileName = "yt-dlp",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+
+        processStartInfo.ArgumentList.Add("--dump-single-json");
+        processStartInfo.ArgumentList.Add("--skip-download");
+        processStartInfo.ArgumentList.Add(downloadUrl);
+
+        using var process = Process.Start(processStartInfo) ?? throw new InvalidOperationException("Failed to start yt-dlp");
+
+        using var registration = cancellationToken.Register(() =>
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        });
+
+        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        Task<string> stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+
+        await Task.WhenAll(process.WaitForExitAsync(cancellationToken), stdoutTask, stderrTask);
+
+        if (process.ExitCode != 0)
+        {
+            string stderr = await stderrTask;
+            throw new Exception(stderr);
+        }
+
+        string stdout = await stdoutTask;
+        var downloadMetadata = JsonSerializer.Deserialize<DownloadMetadata>(stdout);
+
+        return downloadMetadata;
+    }
+
     public static async Task<string> GetYTAudioFilePath(string downloadUrl, string outputPath, CancellationToken cancellationToken)
     {
         var processStartInfo = new ProcessStartInfo()
